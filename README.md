@@ -88,10 +88,10 @@ The HTML file contains three main sections:
 
 ## 📂 Repository Structure
 
-├── index.html # Demo interface
-├── demo-architecture.png
-├── demo-ui.png
-└── README.md
+index.html # Demo interface
+├demo-architecture.png
+demo-ui.png
+README.md
 
 This project is for educational purposes.
 
