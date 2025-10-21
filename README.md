@@ -85,14 +85,6 @@ The HTML file contains three main sections:
 - Zeynal Mardanli
 
 ---
-
-## 📂 Repository Structure
-
-index.html # Demo interface
-├demo-architecture.png
-demo-ui.png
-README.md
-
 This project is for educational purposes.
 
 
