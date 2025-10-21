@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Edge Computing Demo – CloudFront vs Direct S3</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Leaflet.js -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #f6f8fa;
+      color: #333;
+      text-align: center;
+      margin: 40px;
+    }
+    h1 { color: #0073bb; }
+    video {
+      width: 80%;
+      max-width: 800px;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      margin-top: 20px;
+    }
+    button {
+      background-color: #0073bb;
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 6px;
+      font-size: 16px;
+      margin: 10px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    button:hover { background-color: #005a94; }
+    #result {
+      margin-top: 20px;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    #location {
+      margin-top: 8px;
+      color: #555;
+      font-size: 16px;
+    }
+    #chartContainer {
+      margin-top: 40px;
+      width: 90%;
+      max-width: 700px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #map {
+      height: 400px;
+      width: 90%;
+      max-width: 700px;
+      margin: 40px auto;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+  </style>
+</head>
+<body>
+  <h1>Edge Computing Demo</h1>
+  <p>Compare loading time, cache behavior, and edge location for S3 vs CloudFront.</p>
+
+  <video id="demoVideo" controls preload="none">
+    <source id="videoSource" src="" type="video/mp4" />
+    Your browser does not support the video tag.
+  </video>
+
+  <div>
+    <button onclick="loadVideo('s3')">Load from S3 (No CloudFront)</button>
+    <button onclick="loadVideo('cf')">Load from CloudFront</button>
+  </div>
+
+  <p id="result"></p>
+  <p id="location"></p>
+
+  <div id="chartContainer">
+    <canvas id="latencyChart"></canvas>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    // CONFIG
+    const s3URL = "REPLACE WITH YOUR S3 BUCKET URL TO A PUBLIC VIDEO FILE";
+    const cfURL = "REPLACE WITH YOUR CLOUDFRONT DISTRIBUTION URL TO THE SAME VIDEO";
+
+    let s3Times = [];
+    let cfTimes = [];
+
+    // CHART SETUP
+    const ctx = document.getElementById("latencyChart").getContext("2d");
+    const latencyChart = new Chart(ctx, {
+      type: "bar",
+      data: {
+        labels: ["S3 (No CloudFront)", "CloudFront (Edge)"],
+        datasets: [{
+          label: "Average Load Time (s)",
+          data: [0, 0],
+          backgroundColor: ["#8884d8", "#00c49f"],
+          borderRadius: 6
+        }]
+      },
+      options: {
+        scales: {
+          y: { beginAtZero: true, title: { display: true, text: "Seconds" } }
+        },
+        plugins: {
+          legend: { display: false },
+          title: { display: true, text: "Average Load Time Comparison" }
+        }
+      }
+    });
+
+    // MAP SETUP
+    const map = L.map("map").setView([20, 0], 2);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors"
+    }).addTo(map);
+    let marker;
+
+    // FETCH POP LOCATIONS DYNAMICALLY
+    let popData = null;
+    async function loadPopData() {
+        if (popData) return popData; // cache
+        try {
+          const res = await fetch("https://raw.githubusercontent.com/tobilg/aws-edge-locations/main/data/aws-edge-locations.csv");
+          const csvText = await res.text();
+          const rows = csvText.trim().split("\n").slice(1); // skip header
+
+          popData = {};
+          for (const row of rows) {
+            const parts = row.split(",").map(v => v.trim());
+            if (parts.length < 6) continue;
+
+            const [code, city, country, country_code, latitude, longitude] = parts;
+            const lat = parseFloat(latitude);
+            const lon = parseFloat(longitude);
+            
+            if (isNaN(lat) || isNaN(lon)) continue;
+
+            popData[code.toUpperCase()] = [lat, lon, city, country];
+          }
+          return popData;
+        } catch (err) {
+          console.error("Failed to fetch POP CSV:", err);
+          return {};
+        }
+      }
+
+
+    // MAIN FUNCTION
+    async function loadVideo(source) {
+      const video = document.getElementById("demoVideo");
+      const result = document.getElementById("result");
+      const location = document.getElementById("location");
+      const url = source === "s3" ? s3URL : cfURL;
+
+      result.textContent = `Loading video from ${source === "s3" ? "S3" : "CloudFront"}...`;
+      location.textContent = "";
+
+      const start = performance.now();
+
+      // Reset and load new source
+      video.pause();
+      video.src = url;
+      video.load();
+
+      video.onloadeddata = async () => {
+        const end = performance.now();
+        const loadTime = ((end - start) / 1000).toFixed(2);
+        result.textContent = `✅ Video loaded in ${loadTime}s from ${source === "s3" ? "S3" : "CloudFront"}`;
+
+        // Update chart data
+        if (source === "s3") s3Times.push(parseFloat(loadTime));
+        else cfTimes.push(parseFloat(loadTime));
+        updateChart();
+
+        // Get edge location
+        try {
+          const response = await fetch(url, { method: "HEAD" });
+          const pop = response.headers.get("x-amz-cf-pop");
+          const cache = response.headers.get("x-cache");
+          if (pop) {
+            const edgeCode = pop.slice(0, 3).toUpperCase();
+            const pops = await loadPopData();
+            const data = pops[edgeCode];
+            if (data) {
+              const [lat, lon, city, country] = data;
+              location.textContent = `📍 Edge Location: ${edgeCode} – ${city}, ${country} (${cache})`;
+              plotEdge(lat, lon, edgeCode, city, country);
+            } else {
+              location.textContent = `📍 Edge Location: ${edgeCode} (coordinates unavailable)`;
+            }
+          } else {
+            location.textContent = "📍 Edge Location: N/A (direct from origin)";
+          }
+        } catch (err) {
+          console.error(err);
+          location.textContent = "⚠️ Could not fetch edge location headers.";
+        }
+      };
+
+      video.onerror = () => {
+        result.textContent = "❌ Error loading video. Check permissions or URL.";
+        location.textContent = "";
+      };
+    }
+
+    // UPDATE CHART
+    function updateChart() {
+      const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+      latencyChart.data.datasets[0].data = [
+        avg(s3Times).toFixed(2),
+        avg(cfTimes).toFixed(2)
+      ];
+      latencyChart.update();
+    }
+
+    // PLOT EDGE LOCATION 
+    function plotEdge(lat, lon, code, city, country) {
+      if (marker) map.removeLayer(marker);
+      marker = L.marker([lat, lon]).addTo(map)
+        .bindPopup(`<b>${code}</b><br>${city}, ${country}`)
+        .openPopup();
+      map.setView([lat, lon], 4, { animate: true });
+    }
+  </script>
+</body>
+</html>
